@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id               Int       @id @default(autoincrement())
+  phone            String    @unique
+  password         String?   // Hashed
+  full_name        String?
+  email            String?   @unique
+  profile_image    String?
+  roles            String?   // JSON string in SQLite
+  city             String?
+  region           String?
+  price_per_event  Float?
+  role_prices      String?   // JSON string in SQLite
+  bio              String?
+  experience_years Int?
+  available        Boolean   @default(true)
+  created_at       DateTime  @default(now())
+
+  // Auth fields
+  verification_code String?
+  verification_code_expires DateTime?
+
+  // Relations
+  received_jobs    JobRequest[] @relation("WaiterJobs")
+  sent_jobs        JobRequest[] @relation("ManagerJobs")
+  
+  received_ratings Rating[]     @relation("WaiterRatings")
+  given_ratings    Rating[]     @relation("ManagerRatings")
+}
+
+model JobRequest {
+  id                 Int      @id @default(autoincrement())
+  waiter_id          Int
+  event_manager_id   Int
+  event_date         DateTime
+  event_location     String?
+  price_offered      Float?
+  event_type         String?
+  notes              String?
+  status             String   @default("pending") // pending, accepted, paid, completed, cancelled
+  requested_role     String?
+  cancellation_reason String?
+  created_date       DateTime @default(now())
+
+  waiter             User     @relation("WaiterJobs", fields: [waiter_id], references: [id])
+  event_manager      User     @relation("ManagerJobs", fields: [event_manager_id], references: [id])
+  
+  rating             Rating?
+}
+
+model Rating {
+  id               Int      @id @default(autoincrement())
+  waiter_id        Int
+  event_manager_id Int
+  job_request_id   Int      @unique
+  rating           Int
+  review           String?
+  created_at       DateTime @default(now())
+
+  waiter           User       @relation("WaiterRatings", fields: [waiter_id], references: [id])
+  event_manager    User       @relation("ManagerRatings", fields: [event_manager_id], references: [id])
+  job_request      JobRequest @relation(fields: [job_request_id], references: [id])
+}
