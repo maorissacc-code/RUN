@@ -1,0 +1,10 @@
+{
+    "name": "melzarim-production",
+    "version": "1.0.0",
+    "scripts": {
+        "start": "node server/app.js",
+        "install-deps": "cd server && npm install && npx prisma generate && npx prisma db push",
+        "seed": "node server/seed.js"
+    },
+    "dependencies": {}
+}
