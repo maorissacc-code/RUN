@@ -23,4 +23,15 @@ dist-ssr
 *.sln
 *.sw?
 
-# .env
+# 🔐 Environment files with secrets - NEVER COMMIT!
+.env
+.env.local
+.env.development
+.env.production
+.env*.local
+server/.env
+*/.env
+
+# Keep template files
+!.env.example
+!server/.env.example

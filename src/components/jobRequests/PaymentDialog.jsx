@@ -10,53 +10,50 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { CreditCard, Loader2 } from 'lucide-react';
+import { CreditCard, Loader2, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function PaymentDialog({ jobRequest, platformFee = 50 }) {
   const [open, setOpen] = useState(false);
-  const [invoiceHtml, setInvoiceHtml] = useState(null);
+  const [iframeUrl, setIframeUrl] = useState(null);
+  const [paymentCompleted, setPaymentCompleted] = useState(false);
 
   const createPaymentMutation = useMutation({
     mutationFn: async () => {
-      const response = await base44.functions.invoke('createCardcomPayment', {
+      const response = await base44.functions.invoke('createCardcomPaymentLink', {
         job_request_id: jobRequest.id,
-        platform_fee: platformFee
+        amount: platformFee
       });
       return response.data;
     },
     onSuccess: (data) => {
-      if (data.success && data.invoice_html) {
-        setInvoiceHtml(data.invoice_html);
-        toast.success('התשלום בוצע בהצלחה');
-      } else if (data.payment_url) {
-        window.location.href = data.payment_url;
+      if (data.success && data.iframe_url) {
+        setIframeUrl(data.iframe_url);
       } else {
-        toast.error('שגיאה ביצירת תשלום');
+        toast.error('שגיאה ביצירת לינק לתשלום');
       }
     },
     onError: (error) => {
-      toast.error('שגיאה ביצירת תשלום');
+      toast.error('שגיאה בתקשורת עם שרת התשלומים');
       console.error(error);
     }
   });
 
-  const handlePrint = () => {
-    const printWindow = window.open('', '_blank');
-    printWindow.document.write(invoiceHtml);
-    printWindow.document.close();
-    printWindow.print();
-  };
-
   const handleClose = () => {
     setOpen(false);
-    // Reload page or invalidate queries to update status in list
-    window.location.reload();
+    setIframeUrl(null);
+    if (paymentCompleted) {
+      window.location.reload();
+    }
   };
+
+  // Note: In a real world app, you'd use a window message listener 
+  // or the SuccessRedirectUrl would point to a page that calls back to the opener
+  // For this demo, the user will see the success page in the iframe.
 
   return (
     <Dialog open={open} onOpenChange={(val) => {
-      if (!val && invoiceHtml) handleClose();
+      if (!val) handleClose();
       else setOpen(val);
     }}>
       <DialogTrigger asChild>
@@ -65,26 +62,31 @@ export default function PaymentDialog({ jobRequest, platformFee = 50 }) {
           שלם עמלה וקבל פרטים
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-2xl" dir="rtl">
-        {invoiceHtml ? (
-          <div className="space-y-4">
-            <DialogHeader>
-              <DialogTitle className="text-center text-2xl text-[#D4AF37]">תשלום בוצע בהצלחה!</DialogTitle>
-            </DialogHeader>
-            <div className="border p-4 rounded bg-gray-50 max-h-[400px] overflow-auto text-sm">
-              <div dangerouslySetInnerHTML={{ __html: invoiceHtml }} />
+      <DialogContent className={`${iframeUrl ? 'sm:max-w-4xl h-[80vh]' : 'sm:max-w-2xl'} p-0 overflow-hidden`} dir="rtl">
+        {iframeUrl ? (
+          <div className="flex flex-col h-full bg-white">
+            <div className="p-4 border-bottom flex justify-between items-center bg-gray-50">
+              <h3 className="font-bold flex items-center">
+                <CreditCard className="w-5 h-5 ml-2 text-[#D4AF37]" />
+                תשלום מאובטח באמצעות Cardcom
+              </h3>
+              <Button variant="ghost" size="sm" onClick={handleClose}>
+                <X className="w-5 h-5" />
+              </Button>
             </div>
-            <div className="flex gap-4">
-              <Button onClick={handlePrint} className="flex-1 bg-blue-600 hover:bg-blue-700">
-                הדפס חשבונית
-              </Button>
-              <Button onClick={handleClose} variant="outline" className="flex-1">
-                סגור ורענן
-              </Button>
+            <iframe
+              src={iframeUrl}
+              className="flex-1 w-full border-none"
+              title="Cardcom Payment"
+              allow="payment"
+              referrerPolicy="no-referrer-when-downgrade"
+            />
+            <div className="p-4 border-t text-center text-xs text-gray-500">
+              התשלום מאובטח בתקן PCI-DSS | מספר הזמנה: {jobRequest.id}
             </div>
           </div>
         ) : (
-          <>
+          <div className="p-6">
             <DialogHeader>
               <DialogTitle>תשלום עמלת פלטפורמה</DialogTitle>
               <DialogDescription>
@@ -92,7 +94,7 @@ export default function PaymentDialog({ jobRequest, platformFee = 50 }) {
               </DialogDescription>
             </DialogHeader>
 
-            <div className="space-y-4">
+            <div className="space-y-4 mt-4">
               <div className="bg-gray-50 p-4 rounded-lg">
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-gray-600">עמלת פלטפורמה:</span>
@@ -115,12 +117,12 @@ export default function PaymentDialog({ jobRequest, platformFee = 50 }) {
               <Button
                 onClick={() => createPaymentMutation.mutate()}
                 disabled={createPaymentMutation.isPending}
-                className="w-full bg-[#D4AF37] hover:bg-[#B8941F] text-[#1a1a1a] font-bold py-6"
+                className="w-full bg-[#D4AF37] hover:bg-[#B8941F] text-[#1a1a1a] font-bold py-6 text-lg"
               >
                 {createPaymentMutation.isPending ? (
                   <>
                     <Loader2 className="w-5 h-5 animate-spin ml-2" />
-                    מעביר לתשלום...
+                    יוצר לינק תשלום...
                   </>
                 ) : (
                   <>
@@ -130,7 +132,7 @@ export default function PaymentDialog({ jobRequest, platformFee = 50 }) {
                 )}
               </Button>
             </div>
-          </>
+          </div>
         )}
       </DialogContent>
     </Dialog>

@@ -34,7 +34,23 @@ export default function Auth() {
     },
     onSuccess: (data) => {
       setCodeSent(true);
-      toast.success('קוד אימות נשלח למספר הטלפון שלך!');
+      // In development, show the code in a toast
+      if (data.development && data.code) {
+        toast.success(`קוד אימות: ${data.code}`, {
+          duration: 30000, // Show for 30 seconds
+          style: {
+            background: '#4CAF50',
+            color: 'white',
+            fontSize: '1.2em',
+            textAlign: 'center',
+            padding: '15px',
+            borderRadius: '8px',
+            fontWeight: 'bold'
+          }
+        });
+      } else {
+        toast.success('קוד אימות נשלח למספר הטלפון שלך!');
+      }
     },
     onError: () => {
       toast.error('שגיאה בשליחת הקוד');

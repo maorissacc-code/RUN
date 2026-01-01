@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import fs from 'fs';
+import twilio from 'twilio';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +20,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'secret_key_change_me';
 
 app.use(cors());
 app.use(express.json());
+
+// Helper to normalize phone numbers
+const normalizePhone = (phone) => {
+  if (!phone) return '';
+  return phone.replace(/\D/g, ''); // Remove all non-digits
+};
 
 // Serve Static Files (Frontend)
 // Hostinger usually expects the backend to serve the frontend if it's a VPS or single Node app
@@ -88,30 +95,58 @@ const generateToken = (user) => {
   return jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '7d' });
 };
 
-// Send Verification Code (Mock)
-app.post('/api/functions/sendVerificationCode', async (req, res) => {
-  const { phone } = req.body;
-  if (!phone) return res.status(400).json({ error: 'Phone required' });
+// Initialize Twilio client if credentials are available
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
 
-  // In a real app, send SMS. Here we just set a fixed code '123456' for demo
-  // or store a random code in DB.
+const twilioClient = accountSid && authToken && twilioPhoneNumber
+  ? twilio(accountSid, authToken)
+  : null;
+
+// Send Verification Code (Test Mode)
+app.post('/api/functions/sendVerificationCode', async (req, res) => {
+  const { phone: rawPhone } = req.body;
+  if (!rawPhone) return res.status(400).json({ error: 'Phone required' });
+
+  const phone = normalizePhone(rawPhone);
+
+  // Use a fixed test code for development
   const code = '123456';
   const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
 
-  // Upsert user to store code
-  await prisma.user.upsert({
-    where: { phone },
-    update: { verification_code: code, verification_code_expires: expires },
-    create: { phone, verification_code: code, verification_code_expires: expires }
-  });
+  try {
+    // Skip Twilio in test mode
+    console.log(`[TEST MODE] Verification code for ${phone}: ${code}`);
 
-  console.log(`Code for ${phone}: ${code}`);
-  res.json({ success: true, message: 'Code sent' });
+    // Upsert user to store code
+    await prisma.user.upsert({
+      where: { phone },
+      update: { verification_code: code, verification_code_expires: expires },
+      create: { phone, verification_code: code, verification_code_expires: expires }
+    });
+
+    // Always return the code in test mode
+    res.json({
+      success: true,
+      message: 'Test verification code generated',
+      development: true,
+      code: code
+    });
+
+  } catch (error) {
+    console.error('Error sending verification code:', error);
+    res.status(500).json({
+      error: 'Failed to process verification code',
+      details: error.message
+    });
+  }
 });
 
 // Phone Login
 app.post('/api/functions/phoneLogin', async (req, res) => {
-  const { phone, code } = req.body;
+  const { phone: rawPhone, code } = req.body;
+  const phone = normalizePhone(rawPhone);
   const user = await prisma.user.findUnique({ where: { phone } });
 
   if (!user || user.verification_code !== code) {
@@ -143,7 +178,8 @@ app.post('/api/functions/phoneLogin', async (req, res) => {
 
 // Password Login
 app.post('/api/functions/loginWithPassword', async (req, res) => {
-  const { phone, password } = req.body;
+  const { phone: rawPhone, password } = req.body;
+  const phone = normalizePhone(rawPhone);
   const user = await prisma.user.findUnique({ where: { phone } });
 
   if (!user || !user.password) {
@@ -165,6 +201,65 @@ app.post('/api/functions/loginWithPassword', async (req, res) => {
   };
 
   res.json({ success: true, session_token: token, user: userResponse });
+});
+
+// Password Reset Endpoints (Missing and called by frontend)
+app.post('/api/functions/requestPasswordReset', async (req, res) => {
+  const { phone: rawPhone } = req.body;
+  const phone = normalizePhone(rawPhone);
+  const user = await prisma.user.findUnique({ where: { phone } });
+
+  if (!user) {
+    // For security, don't reveal if user exists
+    return res.json({ success: true, message: 'If account exists, reset instructions sent.' });
+  }
+
+  // Generate a code/token (recycling verification_code for now)
+  const token = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 mins
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { verification_code: token, verification_code_expires: expires }
+  });
+
+  // In a real app, send email. Here, we just return it or log it.
+  console.log(`[PASSWORD RESET] Token for ${phone}: ${token}`);
+
+  res.json({
+    success: true,
+    message: 'Reset instructions sent',
+    development: true,
+    token: token // Sending token back for demo purposes as requested by frontend flow
+  });
+});
+
+app.post('/api/functions/resetPassword', async (req, res) => {
+  const { token, new_password } = req.body;
+
+  const user = await prisma.user.findFirst({
+    where: {
+      verification_code: token,
+      verification_code_expires: { gt: new Date() }
+    }
+  });
+
+  if (!user) {
+    return res.status(400).json({ error: 'Invalid or expired reset token' });
+  }
+
+  const hashedPassword = await bcrypt.hash(new_password, 10);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      password: hashedPassword,
+      verification_code: null,
+      verification_code_expires: null
+    }
+  });
+
+  res.json({ success: true, message: 'Password updated successfully' });
 });
 
 // --- USER ROUTES ---
@@ -342,7 +437,129 @@ app.post('/api/functions/updateJobRequestStatus', authenticate, async (req, res)
 });
 
 
-// --- PAYMENTS (MOCK) ---
+// --- CARDCOM PAYMENT INTEGRATION ---
+const CARDCOM_API_URL = 'https://secure.cardcom.solutions/api/v11/LowProfile/Create';
+const CARDCOM_TERMINAL = process.env.CARDCOM_TERMINAL_NUMBER || '1000';
+const CARDCOM_API_NAME = process.env.CARDCOM_API_NAME || 'cardtest1994';
+const CARDCOM_SUCCESS_URL = process.env.CARDCOM_SUCCESS_URL || 'http://localhost:5173/payment/success';
+const CARDCOM_FAILED_URL = process.env.CARDCOM_FAILED_URL || 'http://localhost:5173/payment/failed';
+const CARDCOM_WEBHOOK_URL = process.env.CARDCOM_WEBHOOK_URL || '';
+
+// Create Cardcom Payment Link (returns iframe URL)
+app.post('/api/functions/createCardcomPaymentLink', authenticate, async (req, res) => {
+  const { job_request_id, amount, customer_name, customer_email } = req.body;
+
+  if (!job_request_id || isNaN(parseInt(job_request_id))) {
+    return res.status(400).json({ error: 'Invalid Job Request ID' });
+  }
+
+  if (!amount || isNaN(parseFloat(amount))) {
+    return res.status(400).json({ error: 'Invalid amount' });
+  }
+
+  try {
+    // Security: Check user is involved in this job
+    const job = await prisma.jobRequest.findUnique({
+      where: { id: parseInt(job_request_id) },
+      include: { event_manager: true, waiter: true }
+    });
+
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.event_manager_id !== req.user.id && job.waiter_id !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    // Prepare Cardcom request
+    const cardcomPayload = {
+      TerminalNumber: parseInt(CARDCOM_TERMINAL),
+      ApiName: CARDCOM_API_NAME,
+      ReturnValue: `JOB_${job_request_id}`,
+      Amount: parseFloat(amount),
+      SuccessRedirectUrl: `${CARDCOM_SUCCESS_URL}?job_id=${job_request_id}`,
+      FailedRedirectUrl: `${CARDCOM_FAILED_URL}?job_id=${job_request_id}`,
+      WebHookUrl: CARDCOM_WEBHOOK_URL || undefined,
+      Document: {
+        Name: customer_name || job.event_manager?.full_name || 'לקוח',
+        Email: customer_email || job.event_manager?.email || '',
+        Products: [
+          {
+            Description: `עמלת פלטפורמה - הזמנה #${job_request_id}`,
+            UnitCost: parseFloat(amount)
+          }
+        ]
+      }
+    };
+
+    console.log('Cardcom Request:', JSON.stringify(cardcomPayload, null, 2));
+
+    // Call Cardcom API
+    const response = await fetch(CARDCOM_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(cardcomPayload)
+    });
+
+    const cardcomResponse = await response.json();
+    console.log('Cardcom Response:', cardcomResponse);
+
+    if (cardcomResponse.ResponseCode !== 0) {
+      return res.status(400).json({
+        error: 'Cardcom error',
+        details: cardcomResponse.Description || 'Payment creation failed'
+      });
+    }
+
+    // Return the iframe URL
+    res.json({
+      success: true,
+      iframe_url: cardcomResponse.Url,
+      low_profile_code: cardcomResponse.LowProfileCode,
+      job_request_id: job_request_id
+    });
+
+  } catch (e) {
+    console.error('Cardcom Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cardcom Webhook Handler (receives payment notifications)
+app.post('/api/webhooks/cardcom', async (req, res) => {
+  console.log('Cardcom Webhook received:', req.body);
+
+  try {
+    const { ReturnValue, ResponseCode, LowProfileCode } = req.body;
+
+    // Extract job_request_id from ReturnValue (format: JOB_123)
+    const jobIdMatch = ReturnValue?.match(/JOB_(\d+)/);
+    if (!jobIdMatch) {
+      console.error('Invalid ReturnValue format:', ReturnValue);
+      return res.status(400).json({ error: 'Invalid ReturnValue' });
+    }
+
+    const job_request_id = parseInt(jobIdMatch[1]);
+
+    if (ResponseCode === 0) {
+      // Payment successful - update job status
+      await prisma.jobRequest.update({
+        where: { id: job_request_id },
+        data: { status: 'paid' }
+      });
+      console.log(`Job ${job_request_id} marked as paid`);
+    } else {
+      console.log(`Payment failed for job ${job_request_id}:`, ResponseCode);
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Webhook Error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- PAYMENTS (MOCK for invoice generation) ---
 const escapeHtml = (unsafe) => {
   return unsafe
     .replace(/&/g, "&amp;")
